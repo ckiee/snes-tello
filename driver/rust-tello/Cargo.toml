@@ -1,0 +1,60 @@
+[package]
+name = "tello"
+description = "SDK for intel DJI Tello drone using the native api"
+version = "0.6.3"
+authors = ["Alex Halemba <alex-halemba@gmx.de>"]
+edition = "2018"
+repository = "https://github.com/Alexander89/rust-tello"
+license-file = "./LICENCE"
+license = "MIT"
+readme = "./README.md"
+keywords = ["Drone", "Tello", "Ryze", "DJI", "RyzeRobotics"]
+documentation = "https://docs.rs/tello"
+
+[lib]
+name = "tello"
+path = "src/lib.rs"
+
+[[example]]
+name = "fly"
+path = "examples/fly/main.rs"
+
+[[example]]
+name = "fly_gamepad"
+path = "examples/fly_gamepad/main.rs"
+
+[[example]]
+name = "command_mode"
+path = "examples/command_mode/main.rs"
+
+[[example]]
+name = "command_mode_tokio"
+path = "examples/command_mode_tokio/main.rs"
+required-features = ["tokio_async"]
+
+[[example]]
+name = "command_mode_state"
+path = "examples/command_mode_state/main.rs"
+required-features = ["tokio_async"]
+
+[[example]]
+name = "command_mode_keyboard"
+path = "examples/command_mode_keyboard/main.rs"
+
+[dependencies]
+byteorder = "1.4"
+chrono = "0.4.19"
+tokio = { version = "1.11.0", features = ["net", "rt", "sync", "macros", "rt-multi-thread"], optional = true }
+tokio-stream =  { version = "0.1.7", features = ["sync"], optional = true }
+
+[dev-dependencies]
+sdl2 = {version = "0.34.5", features = ["ttf"]}
+# glib = "0.9"
+# gstreamer = "0.15"
+# gstreamer-video = "0.15"
+gilrs = "0.7.4"
+futures = "0.3.16"
+
+[features]
+default = ["tokio_async"]
+tokio_async = ["tokio", "tokio-stream"]

@@ -1,10 +1,11 @@
 extern crate serial;
 
-use std::{io::{self, Write}, process::{Command, Stdio}, sync::mpsc::{self, TrySendError}, thread::{self, JoinHandle}, time::{Duration, Instant}};
+use std::{io::{self, Write}, process::{Command, Stdio}, sync::mpsc::TrySendError, thread::{self, JoinHandle}, time::{Duration, Instant}};
+use std::sync::mpsc;
 
 use clap::{App, Arg};
 use serial::prelude::*;
-use tello::{Drone, Message};
+use tello::{CommandIds, Drone, Message, PackageTypes, UdpCommand};
 
 fn main() {
     let matches = App::new("tello-driver")
@@ -34,9 +35,17 @@ fn drone_loop(addr: &str, controller_rx: mpsc::Receiver<ControllerState>) {
     println!("Connecting to {}...", addr);
     drone.connect(11111);
     drone.start_video().unwrap();
+    drone.set_video_bitrate(1).unwrap();
     drone.send_date_time().unwrap();
     let mut ffplay_channel = {
-        let mut proc = Command::new("ffplay").arg("-").stdin(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let mut proc = Command::new("ffplay")
+            .args(["-probesize", "4096",
+                   "-fflags", "nobuffer",
+                   "-"])
+            .stdin(Stdio::piped())
+            // .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
         proc.stdin.take().unwrap()
     };
     loop {
@@ -44,15 +53,13 @@ fn drone_loop(addr: &str, controller_rx: mpsc::Receiver<ControllerState>) {
         {
             // this is done for drone_meta to get populated
             // to not timeout, and so we can poke at the video data
-            let msg = drone.poll();
-            if let Some(Message::Frame(id, buf)) = msg {
-                println!("recv frame id {}", id);
+            if let Some(Message::Frame(buf)) = drone.poll() {
                 ffplay_channel.write(&buf).unwrap();
             }
+
             if let Some(flight_data) = drone.drone_meta.get_flight_data() {
                 println!("Battery: {}%", flight_data.battery_percentage);
                 if let Ok(state) = controller_rx.recv_timeout(Duration::from_millis(10)) {
-                    dbg!(&state);
                     if state.start && state.select {
                         if flight_data.fly_time > 0 {
                             drone.take_off().unwrap();
@@ -141,7 +148,7 @@ fn make_controller_thread(port_name: &str) -> (JoinHandle<()>, mpsc::Receiver<Co
                             match result {
                                 Err(TrySendError::Disconnected(_)) => {
                                     result.unwrap();
-                                },
+                                }
                                 _ => {}
                             }
                         }

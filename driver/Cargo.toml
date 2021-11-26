@@ -9,4 +9,5 @@ edition = "2021"
 [dependencies]
 clap = "2.33.3"
 serial = "0.4"
-tello = "0.6.3"
+#tello = "0.6.3"
+tello = { path = "rust-tello" }
