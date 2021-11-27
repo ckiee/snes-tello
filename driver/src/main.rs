@@ -1,7 +1,6 @@
 extern crate serial;
 
-use std::sync::atomic::Ordering;
-use std::sync::{Mutex, mpsc};
+use std::sync::{mpsc, Mutex};
 use std::{
     fs::File,
     io::{self, Write},
@@ -42,17 +41,22 @@ fn main() {
 fn drone_loop(addr: &str, controller_state: Arc<Mutex<ControllerState>>) {
     let mut drone = Drone::new(addr);
     println!("Connecting to {}...", addr);
-    drone.connect(11111);
+    drone.connect(6038);
     drone.set_exposure(2).unwrap();
     drone.send_date_time().unwrap();
+    drone.start_video().unwrap();
 
     let mut ffplay_channel = {
         let mut proc = Command::new("ffplay")
             .args([
-                "-probesize", "32",
-                "-fflags", "nobuffer",
-                "-b:v", "1M",
-                "-flags", "truncated",
+                "-probesize",
+                "32",
+                "-fflags",
+                "nobuffer",
+                "-b:v",
+                "1M",
+                "-flags",
+                "truncated",
                 "-framedrop",
                 "-infbuf",
                 "pipe:0", // stdin
@@ -68,13 +72,23 @@ fn drone_loop(addr: &str, controller_state: Arc<Mutex<ControllerState>>) {
     loop {
         // this is done for drone_meta to get populated
         // to not timeout, and so we can poke at the video data
-        if let Some(Message::Frame(buf)) = drone.poll() {
+        let maybe_msg = drone.poll();
+        if let Some(Message::Frame(buf)) = maybe_msg {
             ffplay_channel.write(&buf).unwrap();
             capture.write(&buf).unwrap();
+        } else if let Some(Message::Data(pkg)) = maybe_msg {
+            match pkg.cmd {
+                CommandIds::FlightMsg => {}
+                CommandIds::WifiMsg => {}
+                CommandIds::LogHeaderMsg => {}
+                _ => {
+                    dbg!(pkg);
+                }
+            };
         }
 
         if let Some(flight_data) = drone.drone_meta.get_flight_data() {
-            println!("Battery: {}%", flight_data.battery_percentage);
+            // println!("Battery: {}%", flight_data.battery_percentage);
             let state = {
                 let unlocked = controller_state.lock().unwrap();
                 unlocked.clone()

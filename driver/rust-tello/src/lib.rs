@@ -292,10 +292,9 @@ impl From<u16> for CommandIds {
         }
     }
 }
-/// unformatted response from the drone.
 #[derive(Debug, Clone)]
 pub enum ResponseMsg {
-    Connected(String),
+    Connected { video_port: u8 },
     UnknownCommand(CommandIds),
 }
 
@@ -429,7 +428,8 @@ impl Drone {
         let mut buf = vec![0; 1460];
         socket.set_nonblocking(true).unwrap();
         let read = socket.recv(&mut buf);
-        if let Ok(_) = read {
+        if let Ok(rx_count) = read {
+            dbg!(rx_count);
             Some(Message::Frame(buf))
         } else {
             None
@@ -454,11 +454,10 @@ impl Drone {
             self.last_stick_command = now.clone();
         }
 
-        // poll I-Frame every second and receive udp frame data
+        // poll I-Frame sometimes and receive udp frame data
         if self.video.enabled {
             let delta = now.duration_since(self.video.last_video_poll).unwrap();
-            // 25 fps
-            if delta.as_millis() > 1000/25 {
+            if delta.as_millis() > 1000 / 30 {
                 self.video.last_video_poll = now;
                 self.poll_key_frame().unwrap();
             }
@@ -473,12 +472,11 @@ impl Drone {
         // receive and process data on command socket
         let mut read_buf = [0; 2048];
         if let Ok(received) = self.socket.recv(&mut read_buf) {
-            dbg!(read_buf.len(), received);
             let data = read_buf[..received].to_vec();
             match Message::try_from(data) {
                 Ok(msg) => {
                     match &msg {
-                        Message::Response(ResponseMsg::Connected(_)) => self.status_counter = 0,
+                        Message::Response(ResponseMsg::Connected{video_port: _}) => self.status_counter = 0,
                         Message::Data(Package {
                             data: PackageData::LogMessage(log),
                             ..
@@ -941,9 +939,10 @@ impl TryFrom<Vec<u8>> for Message {
         } else {
             let data = cur.into_inner();
             if data[0..9].to_vec() == b"conn_ack:" {
-                return Ok(Message::Response(ResponseMsg::Connected(
-                    String::from_utf8(data).unwrap(),
-                )));
+                println!("video port {:?}", data);
+                return Ok(Message::Response(ResponseMsg::Connected {
+                    video_port: data[10],
+                }));
             } else if data[0..16].to_vec() == b"unknown command:" {
                 let mut cur = Cursor::new(data[17..].to_owned());
                 let command = CommandIds::from(cur.read_u16::<LittleEndian>().unwrap());
