@@ -4,5 +4,6 @@ with pkgs;
 
 mkShell {
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ openssl ];
+  # i also have openssl so cargo-edit works
+  buildInputs = [ openssl ffmpeg-full ];
 }
