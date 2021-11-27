@@ -1,7 +1,15 @@
 extern crate serial;
 
-use std::{io::{self, Write}, process::{Command, Stdio}, sync::mpsc::TrySendError, thread::{self, JoinHandle}, time::{Duration, Instant}};
-use std::sync::mpsc;
+use std::sync::atomic::Ordering;
+use std::sync::{Mutex, mpsc};
+use std::{
+    fs::File,
+    io::{self, Write},
+    process::{Command, Stdio},
+    sync::{mpsc::TrySendError, Arc},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
 use clap::{App, Arg};
 use serial::prelude::*;
@@ -26,94 +34,96 @@ fn main() {
 
     let drone_ip = matches.value_of("drone_ip").expect("missing argument");
     let port_name = matches.value_of("serial").expect("missing argument");
-    let (_, controller_rx) = make_controller_thread(port_name);
-    drone_loop(&format!("{}:8889", drone_ip), controller_rx);
+    let controller_state = Arc::new(Mutex::new(ControllerState::default()));
+    make_controller_thread(port_name, controller_state.clone());
+    drone_loop(&format!("{}:8889", drone_ip), controller_state.clone());
 }
 
-fn drone_loop(addr: &str, controller_rx: mpsc::Receiver<ControllerState>) {
+fn drone_loop(addr: &str, controller_state: Arc<Mutex<ControllerState>>) {
     let mut drone = Drone::new(addr);
     println!("Connecting to {}...", addr);
     drone.connect(11111);
-    drone.start_video().unwrap();
-    drone.set_video_bitrate(1).unwrap();
+    drone.set_exposure(2).unwrap();
     drone.send_date_time().unwrap();
+
     let mut ffplay_channel = {
         let mut proc = Command::new("ffplay")
-            .args(["-probesize", "4096",
-                   "-fflags", "nobuffer",
-                   "-"])
+            .args([
+                "-probesize", "32",
+                "-fflags", "nobuffer",
+                "-b:v", "1M",
+                "-flags", "truncated",
+                "-framedrop",
+                "-infbuf",
+                "pipe:0", // stdin
+            ])
             .stdin(Stdio::piped())
             // .stderr(Stdio::null())
             .spawn()
             .unwrap();
         proc.stdin.take().unwrap()
     };
+    let mut capture = File::create("capture.h264").unwrap();
+
     loop {
-        let loop_time = Instant::now();
-        {
-            // this is done for drone_meta to get populated
-            // to not timeout, and so we can poke at the video data
-            if let Some(Message::Frame(buf)) = drone.poll() {
-                ffplay_channel.write(&buf).unwrap();
+        // this is done for drone_meta to get populated
+        // to not timeout, and so we can poke at the video data
+        if let Some(Message::Frame(buf)) = drone.poll() {
+            ffplay_channel.write(&buf).unwrap();
+            capture.write(&buf).unwrap();
+        }
+
+        if let Some(flight_data) = drone.drone_meta.get_flight_data() {
+            println!("Battery: {}%", flight_data.battery_percentage);
+            let state = {
+                let unlocked = controller_state.lock().unwrap();
+                unlocked.clone()
+            };
+            if state.start && state.select {
+                if flight_data.fly_time > 0 {
+                    drone.take_off().unwrap();
+                } else {
+                    drone.stop_land().unwrap();
+                }
+            } else if state.start {
+                drone.rc_state.start_engines();
             }
 
-            if let Some(flight_data) = drone.drone_meta.get_flight_data() {
-                println!("Battery: {}%", flight_data.battery_percentage);
-                if let Ok(state) = controller_rx.recv_timeout(Duration::from_millis(10)) {
-                    if state.start && state.select {
-                        if flight_data.fly_time > 0 {
-                            drone.take_off().unwrap();
-                        } else {
-                            drone.stop_land().unwrap();
-                        }
-                    } else if state.start {
-                        drone.rc_state.start_engines();
-                    }
+            drone.rc_state.stop_turn();
+            if state.right {
+                drone.rc_state.go_cw();
+            } else if state.left {
+                drone.rc_state.go_ccw();
+            }
 
-                    drone.rc_state.stop_turn();
-                    if state.right {
-                        drone.rc_state.go_cw();
-                    } else if state.left {
-                        drone.rc_state.go_ccw();
-                    }
+            drone.rc_state.stop_up_down();
+            if state.x {
+                drone.rc_state.go_up();
+            } else if state.b {
+                drone.rc_state.go_down();
+            }
 
-                    drone.rc_state.stop_up_down();
-                    if state.x {
-                        drone.rc_state.go_up();
-                    } else if state.b {
-                        drone.rc_state.go_down();
-                    }
+            drone.rc_state.stop_forward_back();
+            if state.pad_up {
+                drone.rc_state.go_forward();
+            } else if state.pad_down {
+                drone.rc_state.go_back();
+            }
 
-                    drone.rc_state.stop_forward_back();
-                    if state.pad_up {
-                        drone.rc_state.go_forward();
-                    } else if state.pad_down {
-                        drone.rc_state.go_back();
-                    }
-
-                    drone.rc_state.stop_left_right();
-                    if state.pad_left {
-                        drone.rc_state.go_left();
-                    } else if state.pad_right {
-                        drone.rc_state.go_right();
-                    }
-                }
-            } else {
-                eprintln!("no flight data!");
+            drone.rc_state.stop_left_right();
+            if state.pad_left {
+                drone.rc_state.go_left();
+            } else if state.pad_right {
+                drone.rc_state.go_right();
             }
         }
-        thread::sleep(
-            Duration::from_millis(33)
-                .checked_sub(loop_time.elapsed())
-                .unwrap_or_else(|| -> Duration { Duration::from_millis(1) }),
-        );
     }
 }
-fn make_controller_thread(port_name: &str) -> (JoinHandle<()>, mpsc::Receiver<ControllerState>) {
-    let (tx, rx) = mpsc::sync_channel(2);
 
+fn make_controller_thread(port_name: &str, controller_state: Arc<Mutex<ControllerState>>) {
     let port_name = port_name.to_string();
-    let thread = thread::spawn(move || {
+    thread::spawn(move || {
+        let controller_state = controller_state.clone();
         let mut port = init_serial(&port_name);
         let mut poll_count = 0;
         loop {
@@ -143,14 +153,7 @@ fn make_controller_thread(port_name: &str) -> (JoinHandle<()>, mpsc::Receiver<Co
                         };
                         // discard the first 20 samples since weird things happen
                         if poll_count > 20 {
-                            let result = tx.try_send(state);
-                            // if it succeeded or the buffer was full we don't really care
-                            match result {
-                                Err(TrySendError::Disconnected(_)) => {
-                                    result.unwrap();
-                                }
-                                _ => {}
-                            }
+                            *controller_state.lock().unwrap() = state;
                         }
                         poll_count += 1;
                         break;
@@ -159,7 +162,6 @@ fn make_controller_thread(port_name: &str) -> (JoinHandle<()>, mpsc::Receiver<Co
             }
         }
     });
-    (thread, rx)
 }
 
 fn init_serial(port_name: &str) -> impl SerialPort {
@@ -183,7 +185,7 @@ fn read_byte(port: &mut dyn SerialPort) -> io::Result<u8> {
     Ok(*buf.get(0).unwrap())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone)]
 struct ControllerState {
     b: bool,
     y: bool,

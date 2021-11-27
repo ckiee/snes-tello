@@ -457,7 +457,8 @@ impl Drone {
         // poll I-Frame every second and receive udp frame data
         if self.video.enabled {
             let delta = now.duration_since(self.video.last_video_poll).unwrap();
-            if delta.as_secs() > 1 {
+            // 25 fps
+            if delta.as_millis() > 1000/25 {
                 self.video.last_video_poll = now;
                 self.poll_key_frame().unwrap();
             }
@@ -470,8 +471,9 @@ impl Drone {
         }
 
         // receive and process data on command socket
-        let mut read_buf = [0; 20000];
+        let mut read_buf = [0; 2048];
         if let Ok(received) = self.socket.recv(&mut read_buf) {
+            dbg!(read_buf.len(), received);
             let data = read_buf[..received].to_vec();
             match Message::try_from(data) {
                 Ok(msg) => {
@@ -492,7 +494,7 @@ impl Drone {
                             self.status_counter += 1;
                             if self.status_counter == 3 {
                                 self.get_version().unwrap();
-                                self.set_video_bitrate(1).unwrap();
+                                self.set_video_bitrate(5).unwrap();
                                 self.get_alt_limit().unwrap();
                                 self.get_battery_threshold().unwrap();
                                 self.get_att_angle().unwrap();
